@@ -1,0 +1,170 @@
+{
+	"info": {
+		"_postman_id": "cielo-ticket-booking-flash-sale",
+		"name": "Cielo Ticket Booking - Flash Sale Core",
+		"description": "Collection de testes para a API de reserva de ingressos (Flash Booking) Case Técnico Cielo\n\nA collection será carregada com os scripts de teste automáticos: \nAo rodar a requisição 1 cria evento e o script grava automaticamente o UUID em eventId. \nAo rodar 3 reserva ingressos, ele gera um GUID dinâmico para o header Idempotency-Key e salva o reservationId gerado. \nAs requisições de consulta e cancelamento já usam o ID salvo na variável de ambiente da collection.",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"variable": [
+		{
+			"key": "baseUrl",
+			"value": "http://localhost:8080",
+			"type": "string"
+		},
+		{
+			"key": "eventId",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "reservationId",
+			"value": "",
+			"type": "string"
+		}
+	],
+	"item": [
+		{
+			"name": "1. Criar Evento (POST /events)",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"if (pm.response.code === 201) {",
+							"    var data = pm.response.json();",
+							"    pm.collectionVariables.set('eventId', data.id);",
+							"    console.log('eventId salvo:', data.id);",
+							"}"
+						],
+						"type": "text/javascript"
+					}
+				}
+			],
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"title\": \"Show de Abertura Flash Sale\",\n  \"totalCapacity\": 100\n}"
+				},
+				"url": {
+					"raw": "{{baseUrl}}/events",
+					"host": [
+						"{{baseUrl}}"
+					],
+					"path": [
+						"events"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "2. Consultar Disponibilidade (GET /events/:id)",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "{{baseUrl}}/events/{{eventId}}",
+					"host": [
+						"{{baseUrl}}"
+					],
+					"path": [
+						"events",
+						"{{eventId}}"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "3. Reservar Ingressos (POST /events/:id/reservations)",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"if (pm.response.code === 201) {",
+							"    var data = pm.response.json();",
+							"    pm.collectionVariables.set('reservationId', data.id);",
+							"    console.log('reservationId salvo:', data.id);",
+							"}"
+						],
+						"type": "text/javascript"
+					}
+				}
+			],
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					},
+					{
+						"key": "Idempotency-Key",
+						"value": "{{$guid}}",
+						"description": "Chave de idempotência única gerada para a requisição"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"customerId\": \"cli-9921\",\n  \"quantity\": 2\n}"
+				},
+				"url": {
+					"raw": "{{baseUrl}}/events/{{eventId}}/reservations",
+					"host": [
+						"{{baseUrl}}"
+					],
+					"path": [
+						"events",
+						"{{eventId}}",
+						"reservations"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "4. Consultar Reserva (GET /reservations/:id)",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "{{baseUrl}}/reservations/{{reservationId}}",
+					"host": [
+						"{{baseUrl}}"
+					],
+					"path": [
+						"reservations",
+						"{{reservationId}}"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "5. Cancelar Reserva (DELETE /reservations/:id)",
+			"request": {
+				"method": "DELETE",
+				"header": [],
+				"url": {
+					"raw": "{{baseUrl}}/reservations/{{reservationId}}",
+					"host": [
+						"{{baseUrl}}"
+					],
+					"path": [
+						"reservations",
+						"{{reservationId}}"
+					]
+				}
+			},
+			"response": []
+		}
+	]
+}
