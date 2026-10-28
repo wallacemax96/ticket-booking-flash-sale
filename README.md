@@ -157,6 +157,95 @@ src/main/java/com/cielo/ticketbooking/
 
 ---
 
+## 🧪 Como Executar os Testes Unitários
+
+Os testes utilizam JUnit 5, Mockito e Spring MockMvc. Execute-os pela raiz do projeto usando o Maven Wrapper:
+
+**Windows (PowerShell):**
+```powershell
+.\mvnw.cmd test
+```
+
+**Linux/macOS:**
+```bash
+./mvnw test
+```
+
+Para executar apenas os testes de uma classe específica:
+
+**Windows (PowerShell):**
+```powershell
+.\mvnw.cmd test "-Dtest=EventServiceTest"
+```
+
+**Linux/macOS:**
+```bash
+./mvnw test -Dtest=EventServiceTest
+```
+
+Substitua `EventServiceTest` pelo nome da classe desejada, por exemplo `ReservationServiceTest`, `EventControllerTest`, `ReservationControllerTest` ou `GlobalExceptionHandlerTest`.
+
+---
+
+## ⚡ Teste de Integração de Concorrência
+
+O teste `ReservationConcurrencyIT` inicia a aplicação Spring Boot em uma porta aleatória e usa PostgreSQL e Redis reais nos containers locais. Não é necessário iniciar os containers da aplicação (`app-1`, `app-2` ou `nginx`), pois o próprio teste inicia uma instância isolada da aplicação para receber as requisições.
+
+### Pré-requisitos e preparação
+
+1. Inicie o Docker Desktop (ou outro daemon Docker) e confirme que as portas `5432` e `6379` estão disponíveis.
+2. Na raiz do projeto, inicie somente o banco e o Redis:
+
+```bash
+docker compose up -d postgres redis
+```
+
+3. Confirme que ambos os serviços estão ativos:
+
+```bash
+docker compose ps postgres redis
+```
+
+O teste usa as configurações locais padrão da aplicação: PostgreSQL em `localhost:5432` e Redis em `localhost:6379`.
+
+### Executar
+
+Para executar todos os testes unitários e de integração:
+
+**Windows (PowerShell):**
+```powershell
+.\mvnw.cmd verify
+```
+
+**Linux/macOS:**
+```bash
+./mvnw verify
+```
+
+Para executar somente o teste de concorrência:
+
+**Windows (PowerShell):**
+```powershell
+.\mvnw.cmd verify "-Dit.test=ReservationConcurrencyIT"
+```
+
+**Linux/macOS:**
+```bash
+./mvnw verify -Dit.test=ReservationConcurrencyIT
+```
+
+### Como o teste funciona
+
+1. Cria, pela API HTTP, um evento com capacidade inicial de 5 ingressos.
+2. Prepara 50 tarefas em uma thread pool. Cada tarefa aguarda uma barreira (`CountDownLatch`); só depois que todas estão prontas, a barreira é liberada para iniciar a disputa simultaneamente.
+3. Cada tarefa envia uma requisição `POST /events/{id}/reservations`, com quantidade 1 e uma chave de idempotência própria. Assim, conflitos de idempotência não são confundidos com falta de estoque.
+4. Verifica as respostas: exatamente 5 devem retornar `201 Created`, 45 devem retornar `409 Conflict` com erro de estoque esgotado, e nenhum outro status é aceito.
+5. Consulta o estado persistido e confirma que há exatamente 5 reservas, que a capacidade disponível no PostgreSQL é 0 e que a chave de estoque no Redis também vale 0. Essas verificações detectam venda acima do estoque ou capacidade negativa.
+
+O teste cria dados no banco local e não os remove ao final. Cada execução cria um novo evento; mantenha os containers ativos durante toda a execução.
+
+---
+
 ## 📬 Coleção de Testes e Endpoints da API
 
 O projeto inclui o arquivo **`ticket-booking-collection.json`** na raiz para importação imediata no **Postman** ou **Insomnia**.
