@@ -244,6 +244,26 @@ Para executar somente o teste de concorrência:
 
 O teste cria dados no banco local e não os remove ao final. Cada execução cria um novo evento; mantenha os containers ativos durante toda a execução.
 
+Ao finalizar a fase de integração, o Maven gera automaticamente um relatório executivo HTML consolidando os testes unitários, de controller e de concorrência:
+
+```text
+target/reports/test-report.html
+```
+
+Abra esse arquivo em um navegador para consultar o status geral, totais, duração, resultados por teste e as respostas HTTP individuais da disputa concorrente. O relatório é gerado na fase `post-integration-test`; assim, também fica disponível quando a integração termina com falhas e o Failsafe encerra o `verify` como build falha.
+
+### Consultar a evidência das requisições
+
+Durante a execução, o teste registra uma linha para cada cliente, com o identificador da execução, o cliente e o status HTTP recebido. Ao final, registra o total de requisições, sucessos, conflitos, reservas e estoques no PostgreSQL e no Redis.
+
+Os logs aparecem no console ao executar o Maven. O Failsafe também salva os relatórios em `target/failsafe-reports/`; consulte `com.cielo.ticketbooking.integration.ReservationConcurrencyIT.txt` para o resultado resumido ou `TEST-com.cielo.ticketbooking.integration.ReservationConcurrencyIT.xml` para detalhes da execução e saída registrada.
+
+No PowerShell, para filtrar as linhas de evidência diretamente no console:
+
+```powershell
+.\mvnw.cmd verify "-Dit.test=ReservationConcurrencyIT" | Select-String "Concurrency run="
+```
+
 ---
 
 ## 📬 Coleção de Testes e Endpoints da API
