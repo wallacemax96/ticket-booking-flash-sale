@@ -1,9 +1,9 @@
 package com.cielo.ticketbooking.application.service;
 
 import com.cielo.ticketbooking.application.dto.ReservationResponse;
+import com.cielo.ticketbooking.application.dto.ReservationResult;
 import com.cielo.ticketbooking.application.dto.ReserveTicketsRequest;
 import com.cielo.ticketbooking.domain.exception.ConflictException;
-import com.cielo.ticketbooking.domain.exception.ResourceNotFoundException;
 import com.cielo.ticketbooking.domain.exception.SoldOutException;
 import com.cielo.ticketbooking.domain.model.Event;
 import com.cielo.ticketbooking.domain.model.Reservation;
@@ -96,8 +96,10 @@ class ReservationServiceTest {
                 eq("900000")
         )).thenReturn(1L);
 
-        ReservationResponse response = reservationService.reserveTickets(eventId, validRequest, "idemp-key-1");
+        ReservationResult result = reservationService.reserveTickets(eventId, validRequest, "idemp-key-1");
+        ReservationResponse response = result.reservation();
 
+        assertThat(result.replayed()).isFalse();
         assertThat(response).isNotNull();
         assertThat(response.eventId()).isEqualTo(eventId);
         assertThat(response.customerId()).isEqualTo("customer-123");
@@ -161,9 +163,10 @@ class ReservationServiceTest {
                 eq("900000")
         )).thenReturn(1L);
 
-        ReservationResponse response = reservationService.reserveTickets(eventId, validRequest, "idemp-key-3");
+        ReservationResult result = reservationService.reserveTickets(eventId, validRequest, "idemp-key-3");
 
-        assertThat(response).isNotNull();
+        assertThat(result.reservation()).isNotNull();
+        assertThat(result.replayed()).isFalse();
         verify(valueOperations).setIfAbsent(eq("event:" + eventId + ":available"), eq("50"));
         verify(eventRepository).decrementAvailableCapacity(eventId, 2);
     }
@@ -214,13 +217,134 @@ class ReservationServiceTest {
                 .build();
 
         when(reservationRepository.findById(reservationId)).thenReturn(Optional.of(reservation));
+        when(reservationRepository.cancelPendingReservation(
+                eq(reservationId),
+                eq(ReservationStatus.PENDING),
+                eq(ReservationStatus.CANCELLED),
+                any(Instant.class)
+        )).thenReturn(1);
 
         reservationService.cancelReservation(reservationId);
 
         assertThat(reservation.getStatus()).isEqualTo(ReservationStatus.CANCELLED);
-        verify(reservationRepository).save(reservation);
+        verify(reservationRepository).cancelPendingReservation(
+                eq(reservationId),
+                eq(ReservationStatus.PENDING),
+                eq(ReservationStatus.CANCELLED),
+                any(Instant.class)
+        );
         verify(eventRepository).incrementAvailableCapacity(eventId, 3);
         verify(redisTemplate).execute(eq(releaseTicketScript), anyList(), eq("3"));
+    }
+
+    @Test
+    @DisplayName("Não deve cancelar reserva CONFIRMED nem devolver seu estoque")
+    void shouldRejectCancellationOfConfirmedReservation() {
+        UUID reservationId = UUID.randomUUID();
+        Reservation reservation = Reservation.builder()
+                .id(reservationId)
+                .eventId(eventId)
+                .customerId("customer-123")
+                .quantity(3)
+                .status(ReservationStatus.CONFIRMED)
+                .expiresAt(Instant.now().plus(Duration.ofMinutes(5)))
+                .build();
+        when(reservationRepository.findById(reservationId)).thenReturn(Optional.of(reservation));
+        when(reservationRepository.cancelPendingReservation(
+                eq(reservationId),
+                eq(ReservationStatus.PENDING),
+                eq(ReservationStatus.CANCELLED),
+                any(Instant.class)
+        )).thenReturn(0);
+
+        assertThatThrownBy(() -> reservationService.cancelReservation(reservationId))
+                .isInstanceOf(ConflictException.class)
+                .hasMessageContaining("Only PENDING reservations can be cancelled");
+
+        assertThat(reservation.getStatus()).isEqualTo(ReservationStatus.CONFIRMED);
+        verify(eventRepository, never()).incrementAvailableCapacity(any(), anyInt());
+        verify(redisTemplate, never()).execute(eq(releaseTicketScript), anyList(), anyString());
+    }
+
+    @Test
+    @DisplayName("Deve confirmar uma reserva PENDING ainda não expirada")
+    void shouldConfirmPendingReservation() {
+        UUID reservationId = UUID.randomUUID();
+        Reservation reservation = Reservation.builder()
+                .id(reservationId)
+                .eventId(eventId)
+                .customerId("customer-123")
+                .quantity(2)
+                .status(ReservationStatus.CONFIRMED)
+                .expiresAt(Instant.now().plus(Duration.ofMinutes(5)))
+                .build();
+        when(reservationRepository.confirmPendingReservation(
+                eq(reservationId),
+                eq(ReservationStatus.PENDING),
+                eq(ReservationStatus.CONFIRMED),
+                any(Instant.class)
+        )).thenReturn(1);
+        when(reservationRepository.findById(reservationId)).thenReturn(Optional.of(reservation));
+
+        ReservationResponse response = reservationService.confirmReservation(reservationId);
+
+        assertThat(response.status()).isEqualTo(ReservationStatus.CONFIRMED);
+        verify(reservationRepository).confirmPendingReservation(
+                eq(reservationId),
+                eq(ReservationStatus.PENDING),
+                eq(ReservationStatus.CONFIRMED),
+                any(Instant.class)
+        );
+    }
+
+    @Test
+    @DisplayName("Deve rejeitar confirmação de reserva que não esteja PENDING")
+    void shouldRejectConfirmationWhenReservationIsNotPending() {
+        UUID reservationId = UUID.randomUUID();
+        Reservation reservation = Reservation.builder()
+                .id(reservationId)
+                .eventId(eventId)
+                .customerId("customer-123")
+                .quantity(2)
+                .status(ReservationStatus.CANCELLED)
+                .expiresAt(Instant.now().plus(Duration.ofMinutes(5)))
+                .build();
+        when(reservationRepository.confirmPendingReservation(
+                eq(reservationId),
+                eq(ReservationStatus.PENDING),
+                eq(ReservationStatus.CONFIRMED),
+                any(Instant.class)
+        )).thenReturn(0);
+        when(reservationRepository.findById(reservationId)).thenReturn(Optional.of(reservation));
+
+        assertThatThrownBy(() -> reservationService.confirmReservation(reservationId))
+                .isInstanceOf(ConflictException.class)
+                .hasMessageContaining("Only a non-expired PENDING reservation can be confirmed");
+    }
+
+    @Test
+    @DisplayName("Deve rejeitar segunda confirmação de uma reserva CONFIRMED")
+    void shouldRejectConfirmationOfAlreadyConfirmedReservation() {
+        UUID reservationId = UUID.randomUUID();
+        Reservation reservation = Reservation.builder()
+                .id(reservationId)
+                .eventId(eventId)
+                .customerId("customer-123")
+                .quantity(2)
+                .status(ReservationStatus.CONFIRMED)
+                .expiresAt(Instant.now().plus(Duration.ofMinutes(5)))
+                .build();
+        when(reservationRepository.confirmPendingReservation(
+                eq(reservationId),
+                eq(ReservationStatus.PENDING),
+                eq(ReservationStatus.CONFIRMED),
+                any(Instant.class)
+        )).thenReturn(0);
+        when(reservationRepository.findById(reservationId)).thenReturn(Optional.of(reservation));
+
+        assertThatThrownBy(() -> reservationService.confirmReservation(reservationId))
+                .isInstanceOf(ConflictException.class)
+                .hasMessageContaining("Only a non-expired PENDING reservation can be confirmed");
     }
 
     @Test

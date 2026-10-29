@@ -1,9 +1,11 @@
 package com.cielo.ticketbooking.application.service;
 
 import com.cielo.ticketbooking.application.dto.ReservationResponse;
+import com.cielo.ticketbooking.application.dto.ReservationResult;
 import com.cielo.ticketbooking.application.dto.ReserveTicketsRequest;
 import com.cielo.ticketbooking.domain.exception.ConflictException;
 import com.cielo.ticketbooking.domain.exception.SoldOutException;
+import com.cielo.ticketbooking.domain.model.Reservation;
 import com.cielo.ticketbooking.domain.model.ReservationStatus;
 import com.cielo.ticketbooking.domain.repository.EventRepository;
 import com.cielo.ticketbooking.domain.repository.ReservationRepository;
@@ -11,6 +13,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -24,6 +28,7 @@ import java.util.Base64;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -75,7 +80,7 @@ class ReservationServiceIdempotencyTest {
     }
 
     @Test
-    void shouldReplayOriginalResponseForSameKeyAndPayload() throws Exception {
+    void shouldReturnExistingPendingReservationForSameKeyAndPayload() throws Exception {
         UUID eventId = UUID.randomUUID();
         ReserveTicketsRequest request = new ReserveTicketsRequest("customer-1", 1);
         ReservationResponse originalResponse = new ReservationResponse(
@@ -87,13 +92,63 @@ class ReservationServiceIdempotencyTest {
                 Instant.parse("2026-10-28T12:10:00Z"),
                 Instant.parse("2026-10-28T12:00:00Z")
         );
+        Reservation pendingReservation = Reservation.builder()
+                .id(originalResponse.id())
+                .eventId(eventId)
+                .customerId(request.customerId())
+                .quantity(request.quantity())
+                .status(ReservationStatus.PENDING)
+                .expiresAt(originalResponse.expiresAt())
+                .createdAt(originalResponse.createdAt())
+                .build();
         String redisValue = completedValue(eventId, request, originalResponse);
         when(valueOperations.setIfAbsent(anyString(), anyString(), any())).thenReturn(false);
         when(valueOperations.get("idempotency:" + IDEMPOTENCY_KEY)).thenReturn(redisValue);
+        when(reservationRepository.findById(originalResponse.id())).thenReturn(Optional.of(pendingReservation));
 
-        ReservationResponse response = reservationService.reserveTickets(eventId, request, IDEMPOTENCY_KEY);
+        ReservationResult result = reservationService.reserveTickets(eventId, request, IDEMPOTENCY_KEY);
 
-        assertThat(response).isEqualTo(originalResponse);
+        assertThat(result.replayed()).isTrue();
+        ReservationResponse response = result.reservation();
+        assertThat(response.id()).isEqualTo(originalResponse.id());
+        assertThat(response.status()).isEqualTo(ReservationStatus.PENDING);
+        verify(eventRepository, never()).decrementAvailableCapacity(any(), any(Integer.class));
+        verify(reservationRepository, never()).save(any());
+        verify(redisTemplate, never()).execute(eq(reserveTicketScript), anyList(), any());
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = ReservationStatus.class, names = {"CONFIRMED", "CANCELLED"})
+    void shouldRejectRetryWhenReservationIsConfirmedOrCancelled(ReservationStatus status) throws Exception {
+        UUID eventId = UUID.randomUUID();
+        ReserveTicketsRequest request = new ReserveTicketsRequest("customer-1", 1);
+        ReservationResponse originalResponse = new ReservationResponse(
+                UUID.randomUUID(),
+                eventId,
+                request.customerId(),
+                request.quantity(),
+                ReservationStatus.PENDING,
+                Instant.parse("2026-10-28T12:10:00Z"),
+                Instant.parse("2026-10-28T12:00:00Z")
+        );
+        Reservation closedReservation = Reservation.builder()
+                .id(originalResponse.id())
+                .eventId(eventId)
+                .customerId(request.customerId())
+                .quantity(request.quantity())
+                .status(status)
+                .expiresAt(originalResponse.expiresAt())
+                .createdAt(originalResponse.createdAt())
+                .build();
+        when(valueOperations.setIfAbsent(anyString(), anyString(), any())).thenReturn(false);
+        when(valueOperations.get("idempotency:" + IDEMPOTENCY_KEY))
+                .thenReturn(completedValue(eventId, request, originalResponse));
+        when(reservationRepository.findById(originalResponse.id())).thenReturn(Optional.of(closedReservation));
+
+        assertThatThrownBy(() -> reservationService.reserveTickets(eventId, request, IDEMPOTENCY_KEY))
+                .isInstanceOf(ConflictException.class)
+                .hasMessageContaining(status.name());
+
         verify(eventRepository, never()).decrementAvailableCapacity(any(), any(Integer.class));
         verify(reservationRepository, never()).save(any());
         verify(redisTemplate, never()).execute(eq(reserveTicketScript), anyList(), any());
@@ -161,8 +216,10 @@ class ReservationServiceIdempotencyTest {
                 eq("900000")
         )).thenReturn(1L);
 
-        ReservationResponse response = reservationService.reserveTickets(eventId, request, IDEMPOTENCY_KEY);
+        ReservationResult result = reservationService.reserveTickets(eventId, request, IDEMPOTENCY_KEY);
+        ReservationResponse response = result.reservation();
 
+        assertThat(result.replayed()).isFalse();
         assertThat(response.customerId()).isEqualTo(request.customerId());
         assertThat(response.eventId()).isEqualTo(eventId);
         verify(reservationRepository).save(any());

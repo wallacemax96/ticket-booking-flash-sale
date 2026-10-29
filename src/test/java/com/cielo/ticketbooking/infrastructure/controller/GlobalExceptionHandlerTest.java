@@ -18,6 +18,7 @@ import org.springframework.core.MethodParameter;
 
 import java.lang.reflect.Method;
 import java.net.URI;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -86,12 +87,14 @@ class GlobalExceptionHandlerTest {
                 null,
                 "Quantity must be at least 1"
         ));
-        Method method = GlobalExceptionHandlerTest.class.getDeclaredMethod(
-                "requestParameter",
+        Method method = EventController.class.getDeclaredMethod(
+                "reserveTickets",
+                UUID.class,
+                String.class,
                 ReserveTicketsRequest.class
         );
         MethodArgumentNotValidException exception = new MethodArgumentNotValidException(
-                new MethodParameter(method, 0),
+                new MethodParameter(method, 2),
                 bindingResult
         );
 
@@ -104,6 +107,4 @@ class GlobalExceptionHandlerTest {
         assertThat(problem.getInstance()).isEqualTo(URI.create("/events/123/reservations"));
     }
 
-    private void requestParameter(ReserveTicketsRequest request) {
-    }
 }

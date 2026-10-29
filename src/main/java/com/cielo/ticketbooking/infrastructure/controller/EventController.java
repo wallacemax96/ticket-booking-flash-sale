@@ -3,6 +3,7 @@ package com.cielo.ticketbooking.infrastructure.controller;
 import com.cielo.ticketbooking.application.dto.CreateEventRequest;
 import com.cielo.ticketbooking.application.dto.EventAvailabilityResponse;
 import com.cielo.ticketbooking.application.dto.ReservationResponse;
+import com.cielo.ticketbooking.application.dto.ReservationResult;
 import com.cielo.ticketbooking.application.dto.ReserveTicketsRequest;
 import com.cielo.ticketbooking.application.service.EventService;
 import com.cielo.ticketbooking.application.service.ReservationService;
@@ -38,6 +39,8 @@ public class EventController {
             @PathVariable("id") UUID id,
             @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
             @Valid @RequestBody ReserveTicketsRequest request) {
-        return ResponseEntity.status(HttpStatus.CREATED).body(reservationService.reserveTickets(id, request, idempotencyKey));
+        ReservationResult result = reservationService.reserveTickets(id, request, idempotencyKey);
+        HttpStatus status = result.replayed() ? HttpStatus.OK : HttpStatus.CREATED;
+        return ResponseEntity.status(status).body(result.reservation());
     }
 }
