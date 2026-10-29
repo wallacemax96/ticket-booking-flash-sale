@@ -10,6 +10,7 @@ import com.cielo.ticketbooking.domain.model.Reservation;
 import com.cielo.ticketbooking.domain.model.ReservationStatus;
 import com.cielo.ticketbooking.domain.repository.EventRepository;
 import com.cielo.ticketbooking.domain.repository.ReservationRepository;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -53,6 +54,7 @@ class ReservationServiceTest {
     private DefaultRedisScript<Long> releaseTicketScript;
 
     private ReservationService reservationService;
+    private final ObjectMapper objectMapper = new ObjectMapper().findAndRegisterModules();
 
     private UUID eventId;
     private ReserveTicketsRequest validRequest;
@@ -66,7 +68,8 @@ class ReservationServiceTest {
                 eventRepository,
                 redisTemplate,
                 reserveTicketScript,
-                releaseTicketScript
+                releaseTicketScript,
+                objectMapper
         );
     }
 
@@ -74,7 +77,7 @@ class ReservationServiceTest {
     @DisplayName("Deve criar reserva com sucesso quando houver saldo no Redis e Postgres")
     void shouldReserveTicketsSuccessfully() {
         when(redisTemplate.opsForValue()).thenReturn(valueOperations);
-        when(valueOperations.setIfAbsent(startsWith("idempotency:"), eq("PROCESSING"), any(Duration.class)))
+        when(valueOperations.setIfAbsent(startsWith("idempotency:"), anyString(), any(Duration.class)))
                 .thenReturn(true);
 
         when(redisTemplate.execute(eq(reserveTicketScript), anyList(), eq("2")))
@@ -85,6 +88,13 @@ class ReservationServiceTest {
 
         when(reservationRepository.save(any(Reservation.class)))
                 .thenAnswer(invocation -> invocation.getArgument(0));
+        when(redisTemplate.execute(
+                any(),
+                eq(List.of("idempotency:idemp-key-1")),
+                anyString(),
+                anyString(),
+                eq("900000")
+        )).thenReturn(1L);
 
         ReservationResponse response = reservationService.reserveTickets(eventId, validRequest, "idemp-key-1");
 
@@ -94,14 +104,20 @@ class ReservationServiceTest {
         assertThat(response.quantity()).isEqualTo(2);
         assertThat(response.status()).isEqualTo(ReservationStatus.PENDING);
 
-        verify(valueOperations).set(eq("idempotency:idemp-key-1"), anyString(), any(Duration.class));
+        verify(redisTemplate).execute(
+                any(),
+                eq(List.of("idempotency:idemp-key-1")),
+                anyString(),
+                anyString(),
+                eq("900000")
+        );
     }
 
     @Test
     @DisplayName("Deve rejeitar reserva com SoldOutException se Redis indicar estoque esgotado")
     void shouldThrowSoldOutExceptionWhenRedisReturnsZero() {
         when(redisTemplate.opsForValue()).thenReturn(valueOperations);
-        when(valueOperations.setIfAbsent(startsWith("idempotency:"), eq("PROCESSING"), any(Duration.class)))
+        when(valueOperations.setIfAbsent(startsWith("idempotency:"), anyString(), any(Duration.class)))
                 .thenReturn(true);
 
         when(redisTemplate.execute(eq(reserveTicketScript), anyList(), eq("2")))
@@ -119,7 +135,7 @@ class ReservationServiceTest {
     @DisplayName("Deve realizar warm-up se Redis indicar chave inexistente (-1) e concluir a reserva")
     void shouldWarmUpCacheWhenRedisKeyMissing() {
         when(redisTemplate.opsForValue()).thenReturn(valueOperations);
-        when(valueOperations.setIfAbsent(startsWith("idempotency:"), eq("PROCESSING"), any(Duration.class)))
+        when(valueOperations.setIfAbsent(startsWith("idempotency:"), anyString(), any(Duration.class)))
                 .thenReturn(true);
 
         // 1ª execução retorna -1 (cache miss), 2ª execução após warm-up retorna 1 (sucesso)
@@ -137,6 +153,13 @@ class ReservationServiceTest {
         when(eventRepository.decrementAvailableCapacity(eventId, 2)).thenReturn(1);
         when(reservationRepository.save(any(Reservation.class)))
                 .thenAnswer(invocation -> invocation.getArgument(0));
+        when(redisTemplate.execute(
+                any(),
+                eq(List.of("idempotency:idemp-key-3")),
+                anyString(),
+                anyString(),
+                eq("900000")
+        )).thenReturn(1L);
 
         ReservationResponse response = reservationService.reserveTickets(eventId, validRequest, "idemp-key-3");
 
@@ -149,7 +172,7 @@ class ReservationServiceTest {
     @DisplayName("Deve fazer rollback no Redis se o decremento no Postgres falhar (zero linhas afetadas)")
     void shouldRollbackRedisStockWhenPostgresUpdateFails() {
         when(redisTemplate.opsForValue()).thenReturn(valueOperations);
-        when(valueOperations.setIfAbsent(startsWith("idempotency:"), eq("PROCESSING"), any(Duration.class)))
+        when(valueOperations.setIfAbsent(startsWith("idempotency:"), anyString(), any(Duration.class)))
                 .thenReturn(true);
 
         when(redisTemplate.execute(eq(reserveTicketScript), anyList(), eq("2"))).thenReturn(1L);
@@ -166,7 +189,7 @@ class ReservationServiceTest {
     @DisplayName("Deve lançar ConflictException quando a chave de idempotência já estiver registrada")
     void shouldThrowConflictWhenIdempotencyKeyAlreadyExists() {
         when(redisTemplate.opsForValue()).thenReturn(valueOperations);
-        when(valueOperations.setIfAbsent(startsWith("idempotency:"), eq("PROCESSING"), any(Duration.class)))
+        when(valueOperations.setIfAbsent(startsWith("idempotency:"), anyString(), any(Duration.class)))
                 .thenReturn(false);
         when(valueOperations.get("idempotency:key-duplicated")).thenReturn("res-existing-id");
 
