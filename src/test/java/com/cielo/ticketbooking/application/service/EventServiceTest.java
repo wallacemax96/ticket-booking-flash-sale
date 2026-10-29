@@ -113,7 +113,7 @@ class EventServiceTest {
         EventAvailabilityResponse response = eventService.getAvailability(eventId);
 
         assertThat(response).isEqualTo(new EventAvailabilityResponse(eventId, "Show Flash", 100, 42));
-        verify(valueOperations).set("event:" + eventId + ":read_cache", "Show Flash", Duration.ofSeconds(3));
+        verify(valueOperations).set("event:" + eventId + ":read_cache", "Show Flash", Duration.ofSeconds(5));
     }
 
     @Test
