@@ -4,6 +4,8 @@ import com.cielo.ticketbooking.application.dto.CreateEventRequest;
 import com.cielo.ticketbooking.application.dto.EventAvailabilityResponse;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -30,6 +32,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 class ReservationConcurrencyIT {
 
+    private static final Logger log = LoggerFactory.getLogger(ReservationConcurrencyIT.class);
     private static final int CLIENT_COUNT = 50;
     private static final int INITIAL_STOCK = 5;
 
@@ -92,7 +95,7 @@ class ReservationConcurrencyIT {
                             request,
                             HttpResponse.BodyHandlers.ofString()
                     );
-                    return new HttpResult(response.statusCode(), response.body());
+                    return new HttpResult(clientId, response.statusCode(), response.body());
                 }));
             }
 
@@ -104,6 +107,14 @@ class ReservationConcurrencyIT {
             List<HttpResult> results = requests.stream()
                     .map(this::getResult)
                     .toList();
+
+            results.forEach(result -> log.info(
+                    "Concurrency run={} client={} POST /events/{}/reservations -> HTTP {}",
+                    runId,
+                    result.clientId(),
+                    event.id(),
+                    result.statusCode()
+            ));
 
             assertThat(results).hasSize(CLIENT_COUNT);
             assertThat(results).as("HTTP responses: %s", results)
@@ -130,6 +141,24 @@ class ReservationConcurrencyIT {
             String redisStock = redisTemplate.opsForValue()
                     .get("event:" + event.id() + ":available");
 
+            long successfulRequests = results.stream()
+                    .filter(result -> result.statusCode() == 201)
+                    .count();
+            long rejectedRequests = results.stream()
+                    .filter(result -> result.statusCode() == 409)
+                    .count();
+            log.info(
+                    "Concurrency run={} complete: requests={}, created={}, conflicts={}, " +
+                            "reservations={}, PostgreSQL stock={}, Redis stock={}",
+                    runId,
+                    results.size(),
+                    successfulRequests,
+                    rejectedRequests,
+                    reservationCount,
+                    databaseStock,
+                    redisStock
+            );
+
             assertThat(databaseStock).isZero();
             assertThat(reservationCount).isEqualTo(INITIAL_STOCK);
             assertThat(redisStock).isEqualTo("0");
@@ -147,6 +176,6 @@ class ReservationConcurrencyIT {
         }
     }
 
-    private record HttpResult(int statusCode, String body) {
+    private record HttpResult(int clientId, int statusCode, String body) {
     }
 }
