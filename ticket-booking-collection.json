@@ -2,7 +2,7 @@
 	"info": {
 		"_postman_id": "cielo-ticket-booking-flash-sale",
 		"name": "Cielo Ticket Booking - Flash Sale Core",
-		"description": "Collection de testes para a API de reserva de ingressos (Flash Booking) Case Técnico Cielo\n\nA collection será carregada com os scripts de teste automáticos: \nAo rodar a requisição 1 cria evento e o script grava automaticamente o UUID em eventId. \nAo rodar 3 reserva ingressos, ele gera um GUID dinâmico para o header Idempotency-Key e salva o reservationId gerado. \nAs requisições de consulta e cancelamento já usam o ID salvo na variável de ambiente da collection.",
+		"description": "Collection de testes para a API de reserva de ingressos (Flash Booking) Case Técnico Cielo\n\nA collection será carregada com os scripts de teste automáticos: \nAo rodar a requisição 1 cria evento e o script grava automaticamente o UUID em eventId. \nAo rodar 3 reserva ingressos, a collection gera e mantém um Idempotency-Key para que reenvios sejam retries da mesma reserva e salva o reservationId gerado. Para iniciar uma nova reserva independente, limpe a variável idempotencyKey. A criação retorna 201; retry de uma reserva PENDING retorna 200 sem novo débito; reservas confirmadas, canceladas ou expiradas retornam 409. \nAs requisições de confirmação, consulta e cancelamento usam o ID salvo na variável da collection.",
 		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
 	},
 	"variable": [
@@ -18,6 +18,11 @@
 		},
 		{
 			"key": "reservationId",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "idempotencyKey",
 			"value": "",
 			"type": "string"
 		}
@@ -86,10 +91,23 @@
 			"name": "3. Reservar Ingressos (POST /events/:id/reservations)",
 			"event": [
 				{
+					"listen": "prerequest",
+					"script": {
+						"exec": [
+							"let idempotencyKey = pm.collectionVariables.get('idempotencyKey');",
+							"if (!idempotencyKey) {",
+							"    idempotencyKey = pm.variables.replaceIn('{{$guid}}');",
+							"    pm.collectionVariables.set('idempotencyKey', idempotencyKey);",
+							"}"
+						],
+						"type": "text/javascript"
+					}
+				},
+				{
 					"listen": "test",
 					"script": {
 						"exec": [
-							"if (pm.response.code === 201) {",
+							"if (pm.response.code === 201 || pm.response.code === 200) {",
 							"    var data = pm.response.json();",
 							"    pm.collectionVariables.set('reservationId', data.id);",
 							"    console.log('reservationId salvo:', data.id);",
@@ -131,7 +149,27 @@
 			"response": []
 		},
 		{
-			"name": "4. Consultar Reserva (GET /reservations/:id)",
+			"name": "4. Confirmar Reserva (POST /reservations/:id/confirm)",
+			"request": {
+				"method": "POST",
+				"header": [],
+				"url": {
+					"raw": "{{baseUrl}}/reservations/{{reservationId}}/confirm",
+					"host": [
+						"{{baseUrl}}"
+					],
+					"path": [
+						"reservations",
+						"{{reservationId}}",
+						"confirm"
+					]
+				},
+				"description": "Confirma uma reserva PENDING ainda não expirada. Endpoint demonstrativo; não representa confirmação de pagamento real."
+			},
+			"response": []
+		},
+		{
+			"name": "5. Consultar Reserva (GET /reservations/:id)",
 			"request": {
 				"method": "GET",
 				"header": [],
@@ -149,7 +187,7 @@
 			"response": []
 		},
 		{
-			"name": "5. Cancelar Reserva (DELETE /reservations/:id)",
+			"name": "6. Cancelar Reserva (DELETE /reservations/:id)",
 			"request": {
 				"method": "DELETE",
 				"header": [],
@@ -162,7 +200,8 @@
 						"reservations",
 						"{{reservationId}}"
 					]
-				}
+				},
+				"description": "Cancela somente reservas PENDING. Reservas CONFIRMED não podem ser canceladas e retornam 409 Conflict. Para testar o cancelamento com sucesso, execute antes de confirmar a reserva."
 			},
 			"response": []
 		}

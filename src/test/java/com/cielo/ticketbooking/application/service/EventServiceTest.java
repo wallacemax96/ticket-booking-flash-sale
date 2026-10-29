@@ -74,26 +74,36 @@ class EventServiceTest {
         when(redisTemplate.opsForValue()).thenReturn(valueOperations);
         when(valueOperations.get("event:" + eventId + ":read_cache")).thenReturn("Show Flash");
         when(valueOperations.get("event:" + eventId + ":available")).thenReturn("42");
+        when(valueOperations.get("event:" + eventId + ":total")).thenReturn("100");
 
         EventAvailabilityResponse response = eventService.getAvailability(eventId);
 
-        assertThat(response).isEqualTo(new EventAvailabilityResponse(eventId, "Show Flash", null, 42));
+        assertThat(response).isEqualTo(new EventAvailabilityResponse(eventId, "Show Flash", 100, 42));
         verify(eventRepository, never()).findById(any());
         verify(valueOperations, never()).set(anyString(), anyString(), any(Duration.class));
     }
 
     @Test
-    @DisplayName("Deve retornar disponibilidade zero quando a chave de estoque não estiver no Redis")
-    void shouldReturnZeroAvailabilityWhenStockIsMissingFromCache() {
+    @DisplayName("Deve recuperar os dados do evento quando as chaves de capacidade não estiverem no Redis")
+    void shouldRecoverCapacitiesFromRepositoryWhenRedisKeysAreMissing() {
         UUID eventId = UUID.randomUUID();
+        Event event = Event.builder()
+                .id(eventId)
+                .title("Show Flash")
+                .totalCapacity(100)
+                .availableCapacity(42)
+                .build();
         when(redisTemplate.opsForValue()).thenReturn(valueOperations);
         when(valueOperations.get("event:" + eventId + ":read_cache")).thenReturn("Show Flash");
-        when(valueOperations.get("event:" + eventId + ":available")).thenReturn(null);
+        when(valueOperations.get("event:" + eventId + ":available")).thenReturn(null, "42");
+        when(valueOperations.get("event:" + eventId + ":total")).thenReturn(null);
+        when(eventRepository.findById(eventId)).thenReturn(Optional.of(event));
 
         EventAvailabilityResponse response = eventService.getAvailability(eventId);
 
-        assertThat(response).isEqualTo(new EventAvailabilityResponse(eventId, "Show Flash", null, 0));
-        verify(eventRepository, never()).findById(any());
+        assertThat(response).isEqualTo(new EventAvailabilityResponse(eventId, "Show Flash", 100, 42));
+        verify(valueOperations).setIfAbsent("event:" + eventId + ":total", "100");
+        verify(valueOperations).setIfAbsent("event:" + eventId + ":available", "42");
     }
 
     @Test

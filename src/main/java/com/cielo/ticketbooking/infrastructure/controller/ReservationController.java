@@ -20,6 +20,11 @@ public class ReservationController {
         return ResponseEntity.ok(reservationService.getReservation(id));
     }
 
+    @PostMapping("/{id}/confirm")
+    public ResponseEntity<ReservationResponse> confirmReservation(@PathVariable("id") UUID id) {
+        return ResponseEntity.ok(reservationService.confirmReservation(id));
+    }
+
     @DeleteMapping("/{id}")
     public ResponseEntity<Void> cancelReservation(@PathVariable("id") UUID id) {
         reservationService.cancelReservation(id);

@@ -1,45 +1,31 @@
-# 1. Topologia de Infraestrutura e Alta Disponibilidade
+# 1. Topologia da Aplicação
 
-Este documento detalha o desenho de rede, roteamento e distribuição de carga entre instâncias.
+Visão geral dos componentes e de como as requisições passam pela aplicação.
 
 ```mermaid
-graph TB
-    subgraph Clients["Clientes e Flash Sale Traffic"]
-        C1["Client Requests / Mobile / Web"]
+flowchart LR
+    classDef clientBox fill:#121324,stroke:#8b5cf6,stroke-width:1.5px,color:#f8fafc;
+    classDef ingressBox fill:#0f172a,stroke:#06b6d4,stroke-width:1.5px,color:#f8fafc;
+    classDef appBox fill:#181829,stroke:#f59e0b,stroke-width:1.5px,color:#f8fafc;
+    classDef redisBox fill:#13172c,stroke:#38bdf8,stroke-width:1.5px,color:#f8fafc;
+    classDef pgBox fill:#0e1d24,stroke:#10b981,stroke-width:1.5px,color:#f8fafc;
+
+    CLIENT["Cliente<br/>Web / Mobile"]:::clientBox
+    NGINX["Nginx<br/>Load Balancer :8080"]:::ingressBox
+
+    subgraph APP["Aplicação Spring Boot"]
+        APP1["Instância 1<br/>Java 21"]:::appBox
+        APP2["Instância 2<br/>Java 21"]:::appBox
     end
 
-    subgraph ReverseProxy["Camada de Borda e Ingress"]
-        LB["Nginx Load Balancer<br/>Porta 8080 - Round-Robin"]
-    end
+    REDIS[("Redis<br/>Estoque • Idempotência • Cache")]:::redisBox
+    POSTGRES[("PostgreSQL<br/>Eventos e reservas")]:::pgBox
 
-    subgraph ServiceCluster["Cluster de Aplicação - Múltiplas Instâncias"]
-        APP1["Spring Boot Instance 1<br/>Java 21 Virtual Threads"]
-        APP2["Spring Boot Instance 2<br/>Java 21 Virtual Threads"]
-    end
-
-    subgraph FastPath["Camada em Memória e Concorrência"]
-        R_STOCK[("Redis: Atomic Counters<br/>event:id:available")]
-        R_LOCK[("Redis: Idempotency e Locks<br/>idempotency:key / ShedLock")]
-        R_CACHE[("Redis: Read-Through Cache<br/>event:id:read_cache - TTL 5s")]
-    end
-
-    subgraph PersistentStorage["Camada de Persistência Relacional"]
-        PG[("PostgreSQL 16 Engine<br/>ACID / Row Integrity")]
-    end
-
-    C1 --> LB
-    LB -->|Balanceamento| APP1
-    LB -->|Balanceamento| APP2
-
-    APP1 -->|1. Script Lua Fail-Fast| R_STOCK
-    APP2 -->|1. Script Lua Fail-Fast| R_STOCK
-    
-    APP1 -->|Chave de Idempotência| R_LOCK
-    APP2 -->|Chave de Idempotência| R_LOCK
-
-    APP1 -->|Leitura Eventual| R_CACHE
-    APP2 -->|Leitura Eventual| R_CACHE
-
-    APP1 -->|2. Conditional Update e Insert PENDING| PG
-    APP2 -->|2. Conditional Update e Insert PENDING| PG
+    CLIENT --> NGINX
+    NGINX --> APP1
+    NGINX --> APP2
+    APP1 -->|"Estoque, idempotência e cache"| REDIS
+    APP2 -->|"Estoque, idempotência e cache"| REDIS
+    APP1 -->|"Persistência e validação final do estoque"| POSTGRES
+    APP2 -->|"Persistência e validação final do estoque"| POSTGRES
 ```

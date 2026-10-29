@@ -1,6 +1,7 @@
 package com.cielo.ticketbooking.application.service;
 
 import com.cielo.ticketbooking.application.dto.ReservationResponse;
+import com.cielo.ticketbooking.application.dto.ReservationResult;
 import com.cielo.ticketbooking.application.dto.ReserveTicketsRequest;
 import com.cielo.ticketbooking.domain.exception.ConflictException;
 import com.cielo.ticketbooking.domain.exception.ResourceNotFoundException;
@@ -77,10 +78,10 @@ public class ReservationService {
     }
 
     @Transactional
-    public ReservationResponse reserveTickets(UUID eventId, ReserveTicketsRequest request, String idempotencyKey) {
+    public ReservationResult reserveTickets(UUID eventId, ReserveTicketsRequest request, String idempotencyKey) {
         IdempotencyCheck idempotencyCheck = checkIdempotency(eventId, request, idempotencyKey);
         if (idempotencyCheck.replayResponse() != null) {
-            return idempotencyCheck.replayResponse();
+            return new ReservationResult(idempotencyCheck.replayResponse(), true);
         }
         IdempotencyClaim claim = idempotencyCheck.claim();
         AtomicReference<ReservationResponse> responseAfterCommit = registerIdempotencyCompletion(claim);
@@ -89,16 +90,19 @@ public class ReservationService {
         boolean redisStockReserved = false;
 
         try {
+            // Redis rejeita rapidamente a disputa; PostgreSQL confirma o saldo com atualização condicional.
             decrementRedisStockWithWarmUp(eventId, stockKey, request.quantity());
             redisStockReserved = true;
 
             int rowsUpdated = eventRepository.decrementAvailableCapacity(eventId, request.quantity());
             if (rowsUpdated == 0) {
+                // O banco é a última barreira contra oversell; restaura-se o contador Redis se ele rejeitar.
                 rollbackRedisStock(stockKey, request.quantity());
                 redisStockReserved = false;
                 throw new SoldOutException("Tickets sold out in database consistency check");
             }
 
+            // A reserva permanece PENDING por até 10 minutos para pagamento ou expiração.
             UUID reservationId = UUID.randomUUID();
             Reservation reservation = Reservation.builder()
                     .id(reservationId)
@@ -118,9 +122,10 @@ public class ReservationService {
                     finalizeIdempotency(claim, response);
                 }
             }
-            return response;
+            return new ReservationResult(response, false);
 
         } catch (Exception ex) {
+            // Se a transação não concluir, desfaz no Redis a cota já debitada.
             if (redisStockReserved) {
                 rollbackRedisStock(stockKey, request.quantity());
             }
@@ -134,12 +139,11 @@ public class ReservationService {
     private void decrementRedisStockWithWarmUp(UUID eventId, String stockKey, int quantity) {
         Long quantityAvailable = executeReservationScript(stockKey, quantity);
 
-        // Chave ausente no Redis (-1): faz reaquecimento direto do banco relacional
+        // Em cache miss, recarrega o contador a partir da fonte persistente antes de tentar novamente.
         if (quantityAvailable != null && quantityAvailable == -1L) {
             log.warn("Cache miss on Redis key {}. Warming up from PostgreSQL...", stockKey);
             warmUpRedisStock(eventId, stockKey);
 
-            // Reexecuta o script após o reaquecimento
             quantityAvailable = executeReservationScript(stockKey, quantity);
         }
 
@@ -165,7 +169,7 @@ public class ReservationService {
         Event event = eventRepository.findById(eventId)
                 .orElseThrow(() -> new ResourceNotFoundException("Event not found with ID: " + eventId));
 
-        // SETNX: Só preenche se outra instância paralela ainda não tiver aquecido
+        // SETNX evita sobrescrever o contador caso outra instância já tenha aquecido a chave.
         redisTemplate.opsForValue().setIfAbsent(stockKey, String.valueOf(event.getAvailableCapacity()));
     }
 
@@ -209,7 +213,12 @@ public class ReservationService {
             if (!cachedResult.fingerprint().equals(requestFingerprint)) {
                 throw new ConflictException("Idempotency key was already used with a different request");
             }
-            return new IdempotencyCheck(null, cachedResult.response());
+            // Recarrega o estado atual para não devolver PENDING após a reserva ser confirmada.
+            Reservation reservation = reservationRepository.findById(cachedResult.response().id())
+                    .orElseThrow(() -> new ResourceNotFoundException(
+                            "Reservation not found with ID: " + cachedResult.response().id()
+                    ));
+            return new IdempotencyCheck(null, toRetryResponse(reservation));
         }
 
         Reservation legacyReservation = findLegacyReservation(existing);
@@ -219,7 +228,7 @@ public class ReservationService {
                     || !legacyReservation.getQuantity().equals(request.quantity())) {
                 throw new ConflictException("Idempotency key was already used with a different request");
             }
-            return new IdempotencyCheck(null, toResponse(legacyReservation));
+            return new IdempotencyCheck(null, toRetryResponse(legacyReservation));
         }
 
         throw new ConflictException("Request with this idempotency key has already been processed");
@@ -266,6 +275,7 @@ public class ReservationService {
                     if (completedResponse == null) {
                         releaseIdempotency(claim);
                     } else {
+                        // Só publica o resultado replayável após a reserva estar confirmada no banco.
                         finalizeIdempotency(claim, completedResponse);
                     }
                 }
@@ -294,6 +304,7 @@ public class ReservationService {
         }
 
         try {
+            // A comparação do token impede que uma tentativa antiga finalize a chave de outra chamada.
             Long finalized = redisTemplate.execute(
                     COMPLETE_IDEMPOTENCY_SCRIPT,
                     Collections.singletonList(claim.redisKey()),
@@ -311,6 +322,7 @@ public class ReservationService {
 
     private void releaseIdempotency(IdempotencyClaim claim) {
         try {
+            // Remove apenas a claim desta tentativa, sem desbloquear uma chamada concorrente mais nova.
             redisTemplate.execute(
                     RELEASE_IDEMPOTENCY_SCRIPT,
                     Collections.singletonList(claim.redisKey()),
@@ -349,17 +361,48 @@ public class ReservationService {
     }
 
     @Transactional
+    public ReservationResponse confirmReservation(UUID reservationId) {
+        Instant confirmedAt = Instant.now();
+        int updatedRows = reservationRepository.confirmPendingReservation(
+                reservationId,
+                ReservationStatus.PENDING,
+                ReservationStatus.CONFIRMED,
+                confirmedAt
+        );
+        if (updatedRows == 0) {
+            reservationRepository.findById(reservationId)
+                    .orElseThrow(() -> new ResourceNotFoundException(
+                            "Reservation not found with ID: " + reservationId
+                    ));
+            throw new ConflictException("Only a non-expired PENDING reservation can be confirmed");
+        }
+
+        Reservation reservation = reservationRepository.findById(reservationId)
+                .orElseThrow(() -> new ResourceNotFoundException(
+                        "Reservation not found with ID: " + reservationId
+                ));
+        return toResponse(reservation);
+    }
+
+    @Transactional
     public void cancelReservation(UUID reservationId) {
         Reservation reservation = reservationRepository.findById(reservationId)
                 .orElseThrow(() -> new ResourceNotFoundException("Reservation not found with ID: " + reservationId));
 
-        if (reservation.getStatus() != ReservationStatus.PENDING && reservation.getStatus() != ReservationStatus.CONFIRMED) {
-            throw new ConflictException("Reservation cannot be cancelled in state: " + reservation.getStatus());
+        Instant cancelledAt = Instant.now();
+        int updatedRows = reservationRepository.cancelPendingReservation(
+                reservationId,
+                ReservationStatus.PENDING,
+                ReservationStatus.CANCELLED,
+                cancelledAt
+        );
+        if (updatedRows == 0) {
+            throw new ConflictException("Only PENDING reservations can be cancelled");
         }
 
+        // A transição condicional impede cancelar uma reserva confirmada ou devolver sua cota.
         reservation.setStatus(ReservationStatus.CANCELLED);
-        reservation.setUpdatedAt(Instant.now());
-        reservationRepository.save(reservation);
+        reservation.setUpdatedAt(cancelledAt);
 
         eventRepository.incrementAvailableCapacity(reservation.getEventId(), reservation.getQuantity());
 
@@ -371,6 +414,7 @@ public class ReservationService {
     @SchedulerLock(name = "expireReservationsTask", lockAtLeastFor = "PT10S", lockAtMostFor = "PT25S")
     @Transactional
     public void expirePendingReservations() {
+        // O lock distribuído garante que apenas uma instância expire e devolva cada reserva.
         List<Reservation> expiredReservations = reservationRepository.findByStatusAndExpiresAtBefore(
                 ReservationStatus.PENDING, Instant.now()
         );
@@ -397,5 +441,14 @@ public class ReservationService {
                 r.getExpiresAt(),
                 r.getCreatedAt()
         );
+    }
+
+    private ReservationResponse toRetryResponse(Reservation reservation) {
+        if (reservation.getStatus() != ReservationStatus.PENDING) {
+            throw new ConflictException(
+                    "Cannot retry reservation with status " + reservation.getStatus()
+            );
+        }
+        return toResponse(reservation);
     }
 }

@@ -3,9 +3,11 @@ package com.cielo.ticketbooking.infrastructure.controller;
 import com.cielo.ticketbooking.application.dto.CreateEventRequest;
 import com.cielo.ticketbooking.application.dto.EventAvailabilityResponse;
 import com.cielo.ticketbooking.application.dto.ReservationResponse;
+import com.cielo.ticketbooking.application.dto.ReservationResult;
 import com.cielo.ticketbooking.application.dto.ReserveTicketsRequest;
 import com.cielo.ticketbooking.application.service.EventService;
 import com.cielo.ticketbooking.application.service.ReservationService;
+import com.cielo.ticketbooking.domain.exception.ConflictException;
 import com.cielo.ticketbooking.domain.exception.SoldOutException;
 import com.cielo.ticketbooking.domain.model.ReservationStatus;
 import org.junit.jupiter.api.DisplayName;
@@ -64,7 +66,7 @@ class EventControllerTest {
         UUID eventId = UUID.randomUUID();
         ReservationResponse response = reservationResponse(eventId);
         when(reservationService.reserveTickets(eventId, new ReserveTicketsRequest("customer-123", 2), "idem-123"))
-                .thenReturn(response);
+                .thenReturn(new ReservationResult(response, false));
 
         mockMvc.perform(post("/events/{id}/reservations", eventId)
                         .header("Idempotency-Key", "idem-123")
@@ -81,11 +83,30 @@ class EventControllerTest {
     }
 
     @Test
+    @DisplayName("Deve responder 200 OK no retry da mesma reserva")
+    void shouldReturnOkForIdempotentRetry() throws Exception {
+        UUID eventId = UUID.randomUUID();
+        ReservationResponse response = reservationResponse(eventId);
+        when(reservationService.reserveTickets(eventId, new ReserveTicketsRequest("customer-123", 2), "idem-123"))
+                .thenReturn(new ReservationResult(response, true));
+
+        mockMvc.perform(post("/events/{id}/reservations", eventId)
+                        .header("Idempotency-Key", "idem-123")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"customerId":"customer-123","quantity":2}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.id").value(response.id().toString()))
+                .andExpect(jsonPath("$.status").value("PENDING"));
+    }
+
+    @Test
     @DisplayName("Deve repassar null ao serviço quando o header Idempotency-Key estiver ausente")
     void shouldPassNullIdempotencyKeyWhenHeaderIsAbsent() throws Exception {
         UUID eventId = UUID.randomUUID();
         when(reservationService.reserveTickets(eventId, new ReserveTicketsRequest("customer-123", 2), null))
-                .thenReturn(reservationResponse(eventId));
+                .thenReturn(new ReservationResult(reservationResponse(eventId), false));
 
         mockMvc.perform(post("/events/{id}/reservations", eventId)
                         .contentType(MediaType.APPLICATION_JSON)
@@ -116,6 +137,23 @@ class EventControllerTest {
                 .andExpect(jsonPath("$.status").value(409))
                 .andExpect(jsonPath("$.detail").value("No tickets available"))
                 .andExpect(jsonPath("$.instance").value("/events/" + eventId + "/reservations"));
+    }
+
+    @Test
+    @DisplayName("Deve responder 409 ao repetir reserva confirmada ou cancelada")
+    void shouldReturnConflictWhenRetryingClosedReservation() throws Exception {
+        UUID eventId = UUID.randomUUID();
+        when(reservationService.reserveTickets(eventId, new ReserveTicketsRequest("customer-123", 2), "idem-123"))
+                .thenThrow(new ConflictException("Cannot retry reservation with status CONFIRMED"));
+
+        mockMvc.perform(post("/events/{id}/reservations", eventId)
+                        .header("Idempotency-Key", "idem-123")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"customerId":"customer-123","quantity":2}
+                                """))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.status").value(409));
     }
 
     @Test

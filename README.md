@@ -199,16 +199,17 @@ O projeto inclui o arquivo **`ticket-booking-collection.json`** na raiz para imp
 | :--- | :--- | :--- | :--- |
 | `POST` | `/events` | Criação de evento com capacidade total de ingressos | `201 Created` |
 | `GET` | `/events/:id` | Consulta capacidade e ingressos disponíveis (Cache de 5s) | `200 OK` |
-| `POST` | `/events/:id/reservations` | Cria reserva com header `Idempotency-Key` e trava temporária | `201 Created` |
+| `POST` | `/events/:id/reservations` | Cria reserva (`201`) ou retorna retry idempotente (`200`) com header `Idempotency-Key` | `201 Created` / `200 OK` |
+| `POST` | `/reservations/:id/confirm` | Confirma uma reserva `PENDING` ainda não expirada (endpoint demonstrativo, sem integração de pagamento) | `200 OK` |
 | `GET` | `/reservations/:id` | Consulta o status detalhado de uma reserva | `200 OK` |
-| `DELETE` | `/reservations/:id` | Cancela uma reserva e estorna imediatamente a cota ao estoque | `204 No Content` |
+| `DELETE` | `/reservations/:id` | Cancela somente uma reserva `PENDING` e estorna a cota ao estoque; `CONFIRMED` retorna conflito | `204 No Content` |
 
 ---
 
 ## ⚖️ Decisões Arquiteturais e Trade-offs
 
 * **Virtual Threads (Project Loom):** Habilitadas com `spring.threads.virtual.enabled=true`. Em vez de usar thread pools restritas pelo kernel do SO, a JVM utiliza threads leves de I/O não bloqueante, multiplicando a vazão por container em chamadas de banco e rede.
-* **Idempotência em Duas Etapas:** O Redis mantém a chave `Idempotency-Key` por 15 minutos. Uma repetição após sucesso, com o mesmo evento e payload, recebe a resposta original sem criar reserva nem debitar estoque novamente. A mesma chave com payload diferente e uma repetição enquanto a primeira chamada ainda está processando recebem `409 Conflict`. Se a tentativa original falhar antes do commit, a chave temporária é liberada; o resultado concluído só é gravado depois do commit da reserva.
+* **Idempotência em Duas Etapas:** O Redis mantém a chave `Idempotency-Key` por 15 minutos. A criação inicial retorna `201 Created`. Um retry com a mesma chave e payload retorna `200 OK` apenas enquanto a reserva permanece `PENDING`, sem criar outra reserva nem debitar estoque novamente. Tentativas com a mesma chave e payload diferente, enquanto a primeira chamada ainda está processando, ou após a reserva deixar de estar `PENDING` recebem `409 Conflict`. Se a tentativa original falhar antes do commit, a chave temporária é liberada; o resultado concluído só é gravado depois do commit da reserva.
 * **ShedLock para Expiração de Reservas Pendentes:** Reservas têm validade de 10 minutos. Um job `@Scheduled` roda a cada 30 segundos limpando registros vencidos e devolvendo as cotas ao Redis e Postgres. O ShedLock garante que **apenas 1 das instâncias execute o job a cada ciclo**, eliminando concorrência entre containers.
 * **Consistência Eventual na Consulta (`GET /events/:id`):** O volume de leituras em flash sales é centenas de vezes maior que o de compras. A consulta utiliza cache ultracurto no Redis (TTL de 5 segundos), absorvendo picos sem penalizar o banco relacional.
 
