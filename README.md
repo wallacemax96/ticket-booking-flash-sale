@@ -221,3 +221,4 @@ Para análises detalhadas com diagramas dedicados de cada subdomínio, consulte 
 * [01. Topologia de Infraestrutura e Alta Disponibilidade](docs/architecture/01-topology.md)
 * [02. Fluxo Crítico de Reserva e Barreira Anti-Oversell](docs/architecture/02-reservation-flow.md)
 * [03. Ciclo de Vida da Reserva e Expiração Distribuída](docs/architecture/03-state-lifecycle.md)
+* [04. Evolução Proposta: Processamento Assíncrono com Kafka](docs/architecture/04-event-driven-evolution.md)
