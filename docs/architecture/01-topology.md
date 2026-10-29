@@ -20,7 +20,7 @@ graph TB
     subgraph FastPath["Camada em Memória e Concorrência"]
         R_STOCK[("Redis: Atomic Counters<br/>event:id:available")]
         R_LOCK[("Redis: Idempotency e Locks<br/>idempotency:key / ShedLock")]
-        R_CACHE[("Redis: Read-Through Cache<br/>event:id:read_cache - TTL 3s")]
+        R_CACHE[("Redis: Read-Through Cache<br/>event:id:read_cache - TTL 5s")]
     end
 
     subgraph PersistentStorage["Camada de Persistência Relacional"]

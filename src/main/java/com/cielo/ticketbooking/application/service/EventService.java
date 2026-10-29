@@ -50,7 +50,7 @@ public class EventService {
         Event event = eventRepository.findById(eventId)
                 .orElseThrow(() -> new ResourceNotFoundException("Event not found with ID: " + eventId));
 
-        redisTemplate.opsForValue().set(cacheKey, event.getTitle(), Duration.ofSeconds(3));
+        redisTemplate.opsForValue().set(cacheKey, event.getTitle(), Duration.ofSeconds(5));
         return new EventAvailabilityResponse(event.getId(), event.getTitle(), event.getTotalCapacity(), event.getAvailableCapacity());
     }
 }
