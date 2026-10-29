@@ -39,7 +39,7 @@ graph TB
     subgraph FastPath["Camada em Memória & Concorrência"]
         R_STOCK[("Redis: Atomic Counters<br/>event:id:available")]
         R_LOCK[("Redis: Idempotency & Locks<br/>idempotency:key / ShedLock")]
-        R_CACHE[("Redis: Read-Through Cache<br/>event:id:read_cache - TTL 3s")]
+        R_CACHE[("Redis: Read-Through Cache<br/>event:id:read_cache - TTL 5s")]
     end
 
     subgraph PersistentStorage["Camada de Persistência Relacional"]
@@ -157,6 +157,40 @@ src/main/java/com/cielo/ticketbooking/
 
 ---
 
+## 🧪 Teste de Concorrência entre Instâncias
+
+O teste `MultiInstanceReservationIT` valida o fluxo através do Nginx e das duas instâncias reais (`app-1` e `app-2`) do Docker Compose. Ele aguarda que ambas respondam pelo balanceador, cria um evento com 5 ingressos e dispara 50 reservas simultâneas. O teste exige exatamente 5 respostas `201`, 45 respostas `409`, e confirma que as requisições foram atendidas por pelo menos dois upstreams distintos.
+
+O Nginx inclui o header `X-Upstream-Addr` nas respostas para que o teste possa verificar quais instâncias atenderam as chamadas. Esse header é destinado à demonstração/teste local; não o exponha em um ambiente público de produção sem avaliar as implicações operacionais e de segurança.
+
+Suba o ambiente completo, incluindo o Nginx e as duas instâncias:
+
+```powershell
+docker compose up --build -d
+```
+
+Execute o teste somente contra a infraestrutura já iniciada:
+
+```powershell
+mvn verify "-Dit.test=MultiInstanceReservationIT"
+```
+
+Para executar todos os testes unitários e de integração:
+
+```powershell
+mvn verify
+```
+
+O teste usa `http://localhost:8080` por padrão. Para apontar para outro endereço do balanceador:
+
+```powershell
+mvn verify "-Dit.test=MultiInstanceReservationIT" "-Dticket-booking.base-url=http://localhost:8080"
+```
+
+Depois do `verify`, abra `target/reports/test-report.html`. Na seção **Distribuição das requisições entre instâncias**, expanda **Ver IP do app por requisição** para ver, em cada chamada, o cliente, o status HTTP e o IP:porta do upstream Nginx que a atendeu.
+
+---
+
 ## 📬 Coleção de Testes e Endpoints da API
 
 O projeto inclui o arquivo **`ticket-booking-collection.json`** na raiz para importação imediata no **Postman** ou **Insomnia**.
@@ -164,7 +198,7 @@ O projeto inclui o arquivo **`ticket-booking-collection.json`** na raiz para imp
 | Método | Endpoint | Descrição | Status de Sucesso |
 | :--- | :--- | :--- | :--- |
 | `POST` | `/events` | Criação de evento com capacidade total de ingressos | `201 Created` |
-| `GET` | `/events/:id` | Consulta capacidade e ingressos disponíveis (Cache de 3s) | `200 OK` |
+| `GET` | `/events/:id` | Consulta capacidade e ingressos disponíveis (Cache de 5s) | `200 OK` |
 | `POST` | `/events/:id/reservations` | Cria reserva com header `Idempotency-Key` e trava temporária | `201 Created` |
 | `GET` | `/reservations/:id` | Consulta o status detalhado de uma reserva | `200 OK` |
 | `DELETE` | `/reservations/:id` | Cancela uma reserva e estorna imediatamente a cota ao estoque | `204 No Content` |
@@ -174,9 +208,9 @@ O projeto inclui o arquivo **`ticket-booking-collection.json`** na raiz para imp
 ## ⚖️ Decisões Arquiteturais e Trade-offs
 
 * **Virtual Threads (Project Loom):** Habilitadas com `spring.threads.virtual.enabled=true`. Em vez de usar thread pools restritas pelo kernel do SO, a JVM utiliza threads leves de I/O não bloqueante, multiplicando a vazão por container em chamadas de banco e rede.
-* **Idempotência em Duas Etapas:** Implementada via `SETNX` no Redis com TTL de 15 minutos associado ao header HTTP `Idempotency-Key`. Garante que retentativas de rede de clientes mobile não gerem duplicação de reservas nem debitem estoque extra.
+* **Idempotência em Duas Etapas:** O Redis mantém a chave `Idempotency-Key` por 15 minutos. Uma repetição após sucesso, com o mesmo evento e payload, recebe a resposta original sem criar reserva nem debitar estoque novamente. A mesma chave com payload diferente e uma repetição enquanto a primeira chamada ainda está processando recebem `409 Conflict`. Se a tentativa original falhar antes do commit, a chave temporária é liberada; o resultado concluído só é gravado depois do commit da reserva.
 * **ShedLock para Expiração de Reservas Pendentes:** Reservas têm validade de 10 minutos. Um job `@Scheduled` roda a cada 30 segundos limpando registros vencidos e devolvendo as cotas ao Redis e Postgres. O ShedLock garante que **apenas 1 das instâncias execute o job a cada ciclo**, eliminando concorrência entre containers.
-* **Consistência Eventual na Consulta (`GET /events/:id`):** O volume de leituras em flash sales é centenas de vezes maior que o de compras. A consulta utiliza cache ultracurto no Redis (TTL de 3 segundos), absorvendo picos sem penalizar o banco relacional.
+* **Consistência Eventual na Consulta (`GET /events/:id`):** O volume de leituras em flash sales é centenas de vezes maior que o de compras. A consulta utiliza cache ultracurto no Redis (TTL de 5 segundos), absorvendo picos sem penalizar o banco relacional.
 
 ---
 
